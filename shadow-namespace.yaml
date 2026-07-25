@@ -1,0 +1,106 @@
+# =====================================================================
+# shadow-namespace.yaml  -  影子環境的資源與網路隔離（ADR-003）
+# ---------------------------------------------------------------------
+# 這份設定是「網路層阻斷」那道防線。應用層 dry-run 失效時，靠它擋住。
+# 套用後務必執行檢核表 T-14 實際驗證，不可只看設定檔就當作生效。
+# =====================================================================
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: shadow
+  labels:
+    purpose: parallel-testing
+    data-classification: shadow-only
+---
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: shadow-quota
+  namespace: shadow
+spec:
+  hard:
+    requests.cpu: "16"
+    requests.memory: 32Gi
+    limits.cpu: "16"          # limits = requests，避免 burst 讓性能數字虛高（ADR-005）
+    limits.memory: 32Gi
+    pods: "30"
+---
+# ---------------------------------------------------------------------
+# 預設拒絕所有 egress，再逐條放行。白名單模式，不是黑名單。
+# ---------------------------------------------------------------------
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-egress
+  namespace: shadow
+spec:
+  podSelector: {}
+  policyTypes: [Egress]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-shadow-egress
+  namespace: shadow
+spec:
+  podSelector:
+    matchLabels: { app: new-app }
+  policyTypes: [Egress]
+  egress:
+  # DNS
+  - to:
+    - namespaceSelector:
+        matchLabels: { kubernetes.io/metadata.name: kube-system }
+    ports:
+    - { protocol: UDP, port: 53 }
+    - { protocol: TCP, port: 53 }
+  # 僅允許連 namespace 內的影子 DB 與 stub
+  - to:
+    - podSelector:
+        matchLabels: { app: shadow-db }
+    ports: [{ protocol: TCP, port: 5432 }]
+  - to:
+    - podSelector:
+        matchLabels: { app: wiremock }
+    ports: [{ protocol: TCP, port: 8080 }]
+  # 可觀測性
+  - to:
+    - namespaceSelector:
+        matchLabels: { kubernetes.io/metadata.name: observability }
+    ports: [{ protocol: TCP, port: 3100 }]
+  # ⚠ 刻意不放行：正式 DB、外部收單/清算/簡訊、任何 0.0.0.0/0
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: new-app
+  namespace: shadow
+spec:
+  replicas: 2                 # 固定 replica，PoC 期間不啟用 HPA（ADR-005）
+  selector:
+    matchLabels: { app: new-app }
+  template:
+    metadata:
+      labels: { app: new-app }
+    spec:
+      containers:
+      - name: app
+        image: registry.bank.internal/new-app:poc
+        ports: [{ containerPort: 8080 }]
+        env:
+        - { name: APP_MODE,            value: "shadow" }
+        - { name: SCHEDULER_ENABLED,   value: "false" }   # 關閉所有排程
+        - { name: KAFKA_TOPIC_PREFIX,  value: "shadow." }
+        - { name: OUTBOUND_STUB_URL,   value: "http://wiremock:8080" }
+        - name: JAVA_TOOL_OPTIONS
+          # 容器感知：預設 heap 只取 1/4 記憶體，會造成 GC 頻繁而誤判性能
+          value: >-
+            -XX:MaxRAMPercentage=75
+            -XX:+UseG1GC
+            -XX:ActiveProcessorCount=4
+        resources:
+          requests: { cpu: "4", memory: 8Gi }
+          limits:   { cpu: "4", memory: 8Gi }   # = requests，且需驗證 CFS throttle = 0
+        readinessProbe:
+          httpGet: { path: /actuator/health/readiness, port: 8080 }
+          initialDelaySeconds: 20
