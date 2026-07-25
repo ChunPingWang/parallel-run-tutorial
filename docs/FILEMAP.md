@@ -14,3 +14,7 @@
 | `docs/adr/ADR-005-perf-metric-normalization.md` | 性能指標正規化 |
 | `docs/adr/ADR-006-header-contract.md` | Shadow 流量 Header 契約 |
 | `docs/adr/ADR-007-pii-masking-and-retention.md` | 錄製檔個資遮蔽與保留政策 |
+| `docs/03-verification-report.md` | 本機端到端驗證報告（49 項檢查） |
+| `verify/e2e_verify.py` | 本機端到端驗證工具（模擬新舊服務） |
+| `dist/poc-exec-deck.pptx` / `.pdf` | 管理層簡報產出物（可由 build-deck.js 重現） |
+| `dist/poc-package.zip` | 對外交付打包 |

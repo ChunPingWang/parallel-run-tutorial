@@ -1,6 +1,6 @@
 # CLAUDE.md
 
-給 Claude Code 的專案指引。動手前請先讀 `docs/01-PoC-規劃書.md` 與相關 ADR。
+給 Claude Code 的專案指引。動手前請先讀 `docs/01-poc-plan.md` 與相關 ADR。
 
 ## 專案性質
 

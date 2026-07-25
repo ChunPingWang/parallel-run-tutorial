@@ -13,6 +13,9 @@
 ├── docs/
 │   ├── 01-poc-plan.md            主規劃書（架構、階段、風險）
 │   ├── 02-work-checklist.md            32 項工作 + Gate 定義
+│   ├── 03-verification-report.md       本機端到端驗證報告（49 項全通過）
+│   ├── FILEMAP.md                  檔名對照
+│   ├── build-deck.js               管理層簡報生成腳本（pptxgenjs）
 │   └── adr/
 │       ├── ADR-001-traffic-capture-method.md          錄製重放 vs 即時鏡像
 │       ├── ADR-002-shadow-gateway-placement.md      VM 側 vs K8s 側
@@ -34,11 +37,17 @@
 │   ├── normalizer.py               噪音正規化
 │   ├── noise-profile.yaml          噪音設定檔
 │   └── selftest.py                 自我測試
-└── config/
-    ├── vm/nginx-shadow.conf        VM 側影子閘道（備案）
-    └── k8s/
-        ├── envoy-shadow.yaml       Envoy 影子閘道（備案）
-        └── shadow-namespace.yaml   隔離用 Namespace/Quota/NetworkPolicy/Deployment
+├── config/
+│   ├── vm/nginx-shadow.conf        VM 側影子閘道（備案）
+│   └── k8s/
+│       ├── envoy-shadow.yaml       Envoy 影子閘道（備案）
+│       └── shadow-namespace.yaml   隔離用 Namespace/Quota/NetworkPolicy/Deployment
+├── verify/
+│   └── e2e_verify.py               本機端到端驗證（模擬新舊服務走完全流程）
+└── dist/
+    ├── poc-exec-deck.pptx          管理層簡報（由 docs/build-deck.js 產出）
+    ├── poc-exec-deck.pdf           簡報 PDF 版
+    └── poc-package.zip             對外交付打包
 ```
 
 ---
@@ -52,6 +61,14 @@ cd diff && python3 selftest.py
 ```
 
 預期輸出：注入 4 筆真實缺陷全數偵測，196 筆噪音全數抑制。
+
+完整流程可用本機端到端驗證（模擬新舊服務，涵蓋遮蔽 / 基線 / 比對 / Gate）：
+
+```bash
+python3 verify/e2e_verify.py
+```
+
+各項驗證結果見 `docs/03-verification-report.md`。
 
 ### 1. W1 跨界連通性（在 legacy VM 上）
 
