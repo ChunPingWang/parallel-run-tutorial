@@ -43,7 +43,8 @@
 │       ├── envoy-shadow.yaml       Envoy 影子閘道（備案）
 │       └── shadow-namespace.yaml   隔離用 Namespace/Quota/NetworkPolicy/Deployment
 ├── verify/
-│   └── e2e_verify.py               本機端到端驗證（模擬新舊服務走完全流程）
+│   ├── e2e_verify.py               本機端到端驗證（模擬新舊服務走完全流程）
+│   └── k8s-isolation/              隔離拓樸執行期驗證（T-14，需 kind + Calico）
 └── dist/
     ├── poc-exec-deck.pptx          管理層簡報（由 docs/build-deck.js 產出）
     ├── poc-exec-deck.pdf           簡報 PDF 版

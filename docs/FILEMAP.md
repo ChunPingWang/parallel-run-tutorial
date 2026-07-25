@@ -16,5 +16,6 @@
 | `docs/adr/ADR-007-pii-masking-and-retention.md` | 錄製檔個資遮蔽與保留政策 |
 | `docs/03-verification-report.md` | 本機端到端驗證報告（49 項檢查） |
 | `verify/e2e_verify.py` | 本機端到端驗證工具（模擬新舊服務） |
+| `verify/k8s-isolation/` | 隔離拓樸執行期驗證（T-14）：kind + Calico 叢集內實測 NetworkPolicy 是否真的擋 |
 | `dist/poc-exec-deck.pptx` / `.pdf` | 管理層簡報產出物（可由 build-deck.js 重現） |
 | `dist/poc-package.zip` | 對外交付打包 |

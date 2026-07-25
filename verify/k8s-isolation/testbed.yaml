@@ -1,0 +1,105 @@
+# 隔離拓樸實測用的周邊環境（不屬於 PoC 交付物，只為了驗證 shadow-namespace.yaml）
+#   prod ns          模擬「正式資源」——影子端絕不可連到（不可違反約束 #1）
+#   observability ns 白名單放行對象之一
+#   shadow ns 內     shadow-db / wiremock（白名單）、probe（label app=new-app）、
+#                    probe-nolabel（不帶 app=new-app，用來驗預設拒絕）
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: prod
+  labels: { purpose: production-sim }
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: observability
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: prod-db
+  namespace: prod
+  labels: { app: prod-db }
+spec:
+  containers:
+  - name: listener
+    image: python:3.13-alpine
+    command: ["python3", "-m", "http.server", "5432"]
+    ports: [{ containerPort: 5432 }]
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: loki
+  namespace: observability
+  labels: { app: loki }
+spec:
+  containers:
+  - name: listener
+    image: python:3.13-alpine
+    command: ["python3", "-m", "http.server", "3100"]
+    ports: [{ containerPort: 3100 }]
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: shadow-db
+  namespace: shadow
+  labels: { app: shadow-db }
+spec:
+  containers:
+  - name: listener
+    image: python:3.13-alpine
+    command: ["python3", "-m", "http.server", "5432"]
+    ports: [{ containerPort: 5432 }]
+    resources:
+      requests: { cpu: "50m", memory: 64Mi }
+      limits:   { cpu: "50m", memory: 64Mi }
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: wiremock
+  namespace: shadow
+  labels: { app: wiremock }
+spec:
+  containers:
+  - name: listener
+    image: python:3.13-alpine
+    command: ["python3", "-m", "http.server", "8080"]
+    ports: [{ containerPort: 8080 }]
+    resources:
+      requests: { cpu: "50m", memory: 64Mi }
+      limits:   { cpu: "50m", memory: 64Mi }
+---
+# 帶 app=new-app：allow-shadow-egress 的 podSelector 命中對象
+apiVersion: v1
+kind: Pod
+metadata:
+  name: probe
+  namespace: shadow
+  labels: { app: new-app }
+spec:
+  containers:
+  - name: probe
+    image: python:3.13-alpine
+    command: ["sleep", "7200"]
+    resources:
+      requests: { cpu: "50m", memory: 64Mi }
+      limits:   { cpu: "50m", memory: 64Mi }
+---
+# 不帶 app=new-app：只被 default-deny-egress 命中，應該連 DNS 都出不去
+apiVersion: v1
+kind: Pod
+metadata:
+  name: probe-nolabel
+  namespace: shadow
+  labels: { app: something-else }
+spec:
+  containers:
+  - name: probe
+    image: python:3.13-alpine
+    command: ["sleep", "7200"]
+    resources:
+      requests: { cpu: "50m", memory: 64Mi }
+      limits:   { cpu: "50m", memory: 64Mi }

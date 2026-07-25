@@ -1,14 +1,23 @@
 # 平行測試 PoC 套件驗證報告
 
 **日期** 2026-07-25
-**環境** macOS（Darwin 25.4.0）、Python 3.14 + PyYAML 6.0.3、kubectl（無叢集）、Node 26
+**環境**
+- 第一輪：macOS（Darwin 25.4.0）、Python 3.14 + PyYAML 6.0.3、kubectl（無叢集）、Node 26
+- 第二輪：WSL2 容器（wslc 2.9.4）內 Ubuntu 22.04 + Envoy v1.31 + nginx 1.18 +
+  kubeconform v0.6.7 + Python 3.10；隔離拓樸另在 FedoraLinux-44 的
+  kind v0.32.0 叢集（k8s v1.36.1 + Calico v3.32.1，2 節點）實測
+
 **驗證方式** 靜態檢查 + `diff/selftest.py` + `verify/e2e_verify.py` 本機端到端模擬
++ 設定檔真二進位載入 + K8s 叢集內隔離拓樸實測
 
 ---
 
 ## 1. 結論
 
-**49 / 49 項端到端檢查全數通過，selftest 通過，平行測試理論在本機模擬環境獲得驗證。**
+**53 / 53 項端到端檢查全數通過，selftest 通過，隔離拓樸 17 / 17 項實測通過。**
+
+第二輪驗證把設定檔檢查從「讀字串斷言」升級為「用目標程式實際載入」，
+因此**抓出兩個第一輪漏掉的真實缺陷**（見 3.11）。
 
 本套件宣稱的核心主張逐一實測成立：
 
@@ -116,13 +125,67 @@ gzip 回應解壓、chunked 回應重組皆正確 ✅
   Kafka `shadow.` 前綴 ✅
 - Nginx：影子 timeout 維持 connect 200ms / read 2s、不重試、
   location internal、trace 隔離 ✅
-- Envoy：影子 cluster connect 200ms、`max_retries: 0`、Host 覆寫、
-  `runtime_key` 熱調 ✅
+- Envoy：影子 cluster connect ≤ 200ms（Duration 格式合法）、`max_retries: 0`、
+  關閉鏡像 Host 的 `-shadow` 後綴、`runtime_key` 熱調 ✅
 
 ### 3.10 簡報腳本
 
 `docs/build-deck.js` 以 pptxgenjs 實際執行成功，產出檔與
 `dist/poc-exec-deck.pptx` 位元組數完全一致（346,266 bytes），產物可重現。
+
+### 3.11 設定檔真二進位驗證（新增，R7）
+
+第一輪的設定檔檢查全部是「讀檔比對字串」。第二輪改由目標程式實際載入，
+結果如下：
+
+| 設定 | 方法 | 結果 |
+|---|---|---|
+| `config/k8s/shadow-namespace.yaml` | `kubeconform -strict`（k8s 1.31 schema） | ✅ 5 份資源全數 valid |
+| `config/vm/nginx-shadow.conf` | nginx 1.18 `nginx -t` 實際載入 | ✅ 通過 |
+| `config/k8s/envoy-shadow.yaml` | Envoy v1.31 `--mode validate` | ❌ → 修正後 ✅ |
+
+**Envoy 設定原本載入失敗，兩處真實缺陷：**
+
+1. `connect_timeout: 200ms` —— Envoy 用 protobuf Duration，只接受秒為單位的
+   寫法，`200ms` 讓整份 bootstrap 解析失敗。已改為等值的 `0.2s`
+   （**數值未放寬**，仍是 200ms）。Nginx 的 `200ms` 是合法的，此坑僅限 Envoy。
+2. `host_rewrite_literal` 被寫在 Cluster 上 —— Cluster 沒有這個欄位
+   （`no such field`）。原始意圖（覆寫 Envoy 自動加的 `-shadow` Host 後綴）
+   的正確做法是在 mirror policy 上設 `disable_shadow_host_suffix_append: true`，
+   已改用該欄位並實測通過驗證。
+
+**為什麼第一輪沒抓到：** `verify/e2e_verify.py` 當時斷言的是字串
+`connect_timeout == "200ms"`，正是這條斷言讓一份 Envoy 根本載不進去的設定拿到
+✅。斷言已改為解析數值後比對上限，並新增第 10 節在有二進位時實際載入驗證。
+
+反向測試皆已確認驗證會咬人：kubeconform 對注入的未知欄位判 invalid；
+nginx 對非法 `proxy_connect_timeout` 值報 emerg。
+
+### 3.12 隔離拓樸執行期驗證（T-14，不可違反的約束 #1）
+
+在 kind + Calico 的 2 節點叢集實測，工具見 `verify/k8s-isolation/`：
+
+| 情境 | 期望 | 實測 |
+|---|---|---|
+| **對照組**（先移除 NetworkPolicy） | 可連正式 DB、可連外網 | ✅ 兩者皆通 |
+| `app=new-app` → 正式 DB 5432 | 被擋 | ✅ 逾時 |
+| `app=new-app` → 外部網際網路 1.1.1.1:443 | 被擋 | ✅ 逾時 |
+| `app=new-app` → 影子 DB / wiremock / observability / DNS | 可通 | ✅ 四項皆通 |
+| 未帶 `app=new-app` 的 Pod → 全部目標 | 全擋（含 DNS） | ✅ 六項皆逾時 |
+| 超額 Pod（20 CPU / 40Gi） | 被 ResourceQuota 擋 | ✅ `exceeded quota` |
+| 未宣告 requests/limits 的 Pod | 被擋 | ✅ `must specify` |
+| 整份 manifest `--dry-run=server` | 通過 | ✅ |
+
+方法上的兩個要點：
+
+1. **對照組不可省。** 沒有「移除 policy 後確實連得到」這一步，「連不到」可能只是
+   目標本來就不存在，綠燈毫無意義。
+2. **探針一律用 Pod IP 直連、不經 DNS。** 否則 DNS 被擋時所有目標都會失敗，
+   無法分辨是 NetworkPolicy 生效還是名稱解析失敗。
+
+**必要前提：CNI 必須真的執行 NetworkPolicy。** kind 預設的 kindnet 不強制
+NetworkPolicy，沿用它會讓政策「套上去卻完全不擋」而驗證仍顯示綠燈——
+故叢集以 `disableDefaultCNI: true` 建立並改裝 Calico。
 
 ---
 
@@ -131,8 +194,8 @@ gzip 回應解壓、chunked 回應重組皆正確 ✅
 | 項目 | 原因 | 對應檢核 |
 |---|---|---|
 | `gor` 錄製 / 重放本體（`01-record.sh`、`02/03-replay-*.sh`） | 本機無 gor 二進位；僅通過語法檢查，flag 需依實際 gor 版本驗證 | T-10、T-11 |
-| NetworkPolicy 實際生效 | 無叢集；kubectl client dry-run 無法連線，僅做 YAML 靜態檢查 | **T-14（Gate 阻擋項）** |
-| Nginx / Envoy 設定載入 | 本機無二進位；`nginx -t` / `envoy --mode validate` 未執行 | R7 |
+| 正式環境 CNI 下的 NetworkPolicy 行為 | 已在 kind + Calico 實測生效（3.12）；正式叢集的 CNI、既有政策與網段仍需複驗 | T-14 |
+| VM 側實際拓樸（L4 VIP、shadow-gw、真實 Ingress） | 模擬環境無 VM 與 Ingress | T-12 |
 | CDC 實際延遲分布、gor CPU 佔用、正線 P99 增幅 | 需真實環境 | T-11、T-21、T-24 |
 
 ## 5. 驗證過程中的觀察
@@ -145,11 +208,32 @@ gzip 回應解壓、chunked 回應重組皆正確 ✅
    校準規則時（CLAUDE.md 已知限制）需留意。
 3. 套件需 PyYAML；本機 Python 3.9 / 3.14 皆未內建，README 依賴一節已列明，
    驗證時以 venv 安裝。
+4. **字串斷言會製造假通過。** 3.11 的 Envoy 缺陷是被自己的斷言掩護住的：
+   斷言比對 `"200ms"` 這個字串，而該值正是讓 Envoy 載入失敗的原因。
+   凡是「設定內容」的檢查，只要目標程式提供驗證模式（`nginx -t`、
+   `envoy --mode validate`、`kubeconform`），就應優先用它取代字串比對。
+5. **驗證一定要有對照組。** 3.12 先移除 NetworkPolicy 確認連得到、再套回確認被擋；
+   缺了前半段，「被擋」與「目標根本不存在」在報告上長得一模一樣。
 
 ## 6. 重跑方式
+
+### 6.1 主套件
 
 ```bash
 python3 -m venv .venv && .venv/bin/pip install pyyaml
 .venv/bin/python verify/e2e_verify.py --out-json tmp-verify/results.json
 cd diff && ../.venv/bin/python selftest.py
 ```
+
+`verify/e2e_verify.py` 第 10 節會在偵測到 `envoy` / `kubeconform` / `nginx`
+時實際載入設定驗證；未安裝則記為略過。要讓這三項真的執行，可用容器：
+
+```bash
+# 映像需含 envoy + nginx + kubeconform + python3(PyYAML)
+wslc run --rm -v "$PWD:/src:ro" <image> python3 /src/verify/e2e_verify.py
+```
+
+### 6.2 隔離拓樸（T-14）
+
+見 `verify/k8s-isolation/README.md`。需要一個會執行 NetworkPolicy 的 CNI
+（kind 預設的 kindnet 不會，須改裝 Calico 或 Cilium）。
