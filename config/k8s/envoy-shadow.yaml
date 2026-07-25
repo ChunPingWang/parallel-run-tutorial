@@ -61,6 +61,10 @@ static_resources:
                       # 熱調鍵：Phase 1 起手 10 -> 50 -> 100；回退設 0
                       runtime_key: shadow.mirror_fraction
                     trace_sampled: false
+                    # 關閉 Envoy 預設加在 Host 上的 -shadow 後綴，
+                    # 讓 K8s Ingress 依原 Host 正確選 backend（ADR-006）。
+                    # 註：此為 mirror policy 層級欄位，Cluster 上沒有 host_rewrite_literal。
+                    disable_shadow_host_suffix_append: true
                 request_headers_to_add:
                 - header: { key: "X-Shadow-Request",  value: "true" }
                   append_action: OVERWRITE_IF_EXISTS_OR_ADD
@@ -86,10 +90,10 @@ static_resources:
 
   - name: new_cluster
     type: STRICT_DNS
-    connect_timeout: 200ms          # 影子端連線逾時壓短
+    # 影子端連線逾時壓短（200ms）。
+    # Envoy 用 protobuf Duration，只吃秒為單位的寫法，"200ms" 會讓整份設定解析失敗。
+    connect_timeout: 0.2s
     lb_policy: ROUND_ROBIN
-    # 覆寫 Envoy 預設加的 -shadow 後綴，讓 Ingress 能正確路由
-    host_rewrite_literal: new-app.bank.internal
     circuit_breakers:
       thresholds:
       - priority: DEFAULT
