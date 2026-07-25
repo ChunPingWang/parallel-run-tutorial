@@ -52,6 +52,91 @@
 
 ---
 
+## 架構圖
+
+依 C4 Model 分層：C1 系統情境、C2 容器（合併部署視角 —— VM ↔ K8s 混合拓撲與
+網路隔離是本案關鍵，屬部署層資訊）。C3 僅 diff 引擎有意義（見 CLAUDE.md 模組表），
+不另繪圖。
+
+### C1 系統情境圖
+
+```mermaid
+flowchart LR
+    client["客戶端"]
+
+    subgraph prod["正式環境（不可受影響）"]
+        lb["既有 L4 LB"] --> legacy["舊應用（VM）"]
+        legacy --> proddb[("正式 DB")]
+        legacy --> ext["外部系統<br/>收單 / 清算 / 簡訊"]
+    end
+
+    subgraph poc["平行測試 PoC（本套件）"]
+        gor["GoReplay<br/>錄製 / 遮蔽 / 重放"]
+        diff["diff 比對引擎"]
+    end
+
+    subgraph shadowenv["影子環境（K8s namespace: shadow）"]
+        newapp["新應用（容器）"]
+    end
+
+    client --> lb
+    legacy -. "監聽網卡側錄<br/>（唯讀、正線零改動）" .-> gor
+    gor -- "離線重放" --> newapp
+    gor -- "新舊回應" --> diff
+    diff --> gate["一致率報告 + Gate 判定<br/>（離開碼擋關）"]
+```
+
+### C2 容器暨部署圖（主方案：GoReplay 錄製重放）
+
+```mermaid
+flowchart TB
+    subgraph vm["Legacy VM（正線）"]
+        app["舊應用 :8080"]
+        agent["gor agent<br/>CAP_NET_RAW 被動側錄"]
+        cap["capture.gor<br/>（目錄 700、含個資）"]
+        app -. "側錄 request / response" .-> agent
+        agent --> cap
+    end
+
+    cap --> san["scripts/sanitize-gor.py<br/>SALT 一致性雜湊遮蔽（ADR-007）"]
+    san --> clean["clean.gor<br/>（遮蔽後方可移出正線主機）"]
+
+    subgraph k8s["K8s namespace: shadow（egress 預設拒絕，白名單放行）"]
+        ing["Ingress<br/>依 Host 選 backend"]
+        na["new-app 容器<br/>APP_MODE=shadow（dry-run）<br/>requests = limits、HPA 關閉"]
+        sdb[("影子 DB<br/>CDC 副本")]
+        wm["WireMock<br/>外部系統 stub"]
+        kafka["shadow.* Kafka topic"]
+        ing --> na
+        na --> sdb
+        na --> wm
+        na --> kafka
+    end
+
+    clean -- "02-replay：改寫 Host、<br/>X-Shadow-Request: true、<br/>Idempotency-Key 加後綴（ADR-006）" --> ing
+    ing -. "回應（type 3）" .-> rep["replay.gor<br/>（type 1/2/3）"]
+
+    subgraph engine["比對（diff/）"]
+        de["diff_engine.py compare"]
+        np["noise-profile.yaml<br/>（Phase 0 簽核後）"]
+        np --> de
+    end
+
+    rep --> de
+    de --> rpt["報告 md / json<br/>Gate 未過離開碼 1"]
+```
+
+### 備案：VM 側即時鏡像（僅當「即時發現差異」為硬需求，ADR-001/002）
+
+```mermaid
+flowchart LR
+    vip["既有 L4 VIP"] --> gw["shadow-gw VM ×2<br/>Nginx mirror / Envoy"]
+    gw -- "主線（回應給客戶端）" --> legacy["Legacy VM pool"]
+    gw -. "非同步鏡像 10%→100%<br/>timeout 200ms / 2s，不重試" .-> ing2["K8s Ingress → 新應用<br/>（回應丟棄）"]
+```
+
+---
+
 ## 快速開始
 
 ### 0. 驗證工具本身可用
