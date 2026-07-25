@@ -13,7 +13,7 @@
 ├── docs/
 │   ├── 01-poc-plan.md            主規劃書（架構、階段、風險）
 │   ├── 02-work-checklist.md            32 項工作 + Gate 定義
-│   ├── 03-verification-report.md       本機端到端驗證報告（49 項全通過）
+│   ├── 03-verification-report.md       本機端到端驗證報告（53 項全通過）
 │   ├── FILEMAP.md                  檔名對照
 │   ├── build-deck.js               管理層簡報生成腳本（pptxgenjs）
 │   └── adr/
@@ -44,6 +44,7 @@
 │       └── shadow-namespace.yaml   隔離用 Namespace/Quota/NetworkPolicy/Deployment
 ├── verify/
 │   ├── e2e_verify.py               本機端到端驗證（模擬新舊服務走完全流程）
+│   ├── Dockerfile                  驗證環境映像（envoy / nginx / kubeconform / python3）
 │   └── k8s-isolation/              隔離拓樸執行期驗證（T-14，需 kind + Calico）
 └── dist/
     ├── poc-exec-deck.pptx          管理層簡報（由 docs/build-deck.js 產出）
@@ -216,6 +217,86 @@ LADDER="100 200 500" ./scripts/03-replay-perf.sh /data/clean/legacy_20260725.gor
 ```
 
 **判準是應用內部 timer，不是端到端 latency**（見 ADR-005）。
+
+---
+
+## 在 wslc 容器中執行驗證
+
+`wslc` 是 WSL 內建的容器 CLI（Windows 11 的 WSL 2.9 起隨附，路徑
+`C:\Program Files\WSL\wslc.exe`），子命令與 Docker 幾乎一致。Windows 上不必安裝
+Docker Desktop 即可取得一個乾淨的 Linux 環境。
+
+對本套件的用處是：本機通常沒有 `envoy`、`nginx`、`kubeconform`，設定檔檢查就只能
+退回讀字串比對——而那正是會製造假通過的做法（見 `docs/03-verification-report.md`
+第 3.11 節：一份 Envoy 根本載不進去的設定，曾因字串斷言而拿到通過）。用容器把
+這些二進位補齊，`verify/e2e_verify.py` 第 10 節就會實際載入設定驗證。
+
+### 建置驗證映像
+
+```bash
+wslc build -t pt-verify:1 -f verify/Dockerfile verify/
+```
+
+### 執行整套驗證
+
+專案目錄以**唯讀**掛載，容器內複製一份再動工，工作樹不會被寫入：
+
+```bash
+wslc run --rm -v "<專案絕對路徑>:/src:ro" pt-verify:1 bash -c '
+    mkdir -p /work && cp -a /src/. /work/ && cd /work || exit 1
+    bash -n scripts/*.sh
+    ( cd diff && python3 selftest.py )
+    echo "127.0.0.1 k8s-ingress.internal" >> /etc/hosts   # nginx -t 的 upstream 需可解析
+    python3 verify/e2e_verify.py
+'
+```
+
+預期 `verify/e2e_verify.py` 輸出 53/53 通過，其中第 10 節三項為：
+
+```
+✅ Envoy 實際載入設定通過（envoy --mode validate）
+✅ K8s manifest 通過 schema 嚴格驗證（kubeconform -strict）
+✅ Nginx 實際載入設定通過（nginx -t）
+```
+
+### 只驗單一設定檔
+
+```bash
+# Envoy bootstrap
+wslc run --rm -v "<專案絕對路徑>:/src:ro" pt-verify:1 \
+    envoy --mode validate -c /src/config/k8s/envoy-shadow.yaml
+
+# K8s manifest（不需叢集）
+wslc run --rm -v "<專案絕對路徑>:/src:ro" pt-verify:1 \
+    kubeconform -strict -summary -kubernetes-version 1.31.0 \
+    /src/config/k8s/shadow-namespace.yaml
+```
+
+### 常用管理指令
+
+```bash
+wslc images                  # 列出映像
+wslc list                    # 列出容器
+wslc rmi pt-verify:1         # 刪除映像
+wslc pull python:3.13-slim   # 取得映像
+```
+
+### 兩個會踩到的地雷
+
+**1. `-v` 的參數要先組成單一字串再傳。** PowerShell 裡直接寫
+`-v "$path:/src:ro"` 會把 `$path:` 當成變數名解析，wslc 收到的容器路徑不以 `/`
+開頭而報 `E_INVALIDARG`：
+
+```powershell
+$mount = "C:\path\to\repo" + ":/src:ro"      # 先組好
+wslc run --rm -v $mount pt-verify:1 bash /scripts/run.sh
+```
+
+**2. wslc 跑不了 kind / k3s。** `wslc run` 沒有 `--privileged`、`--cap-add`、
+`--device`、`--security-opt`，巢狀容器執行環境起不來；kind 也只支援
+docker / podman / nerdctl 三種 provider。因此**隔離拓樸驗證（T-14）不能在 wslc 內
+進行**，需要在一個 WSL 發行版裡裝 docker + kind——步驟見
+`verify/k8s-isolation/README.md`。
 
 ---
 
