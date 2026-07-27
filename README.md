@@ -44,8 +44,8 @@
 │       └── shadow-namespace.yaml   隔離用 Namespace/Quota/NetworkPolicy/Deployment
 ├── verify/
 │   ├── e2e_verify.py               本機端到端驗證（模擬新舊服務走完全流程）
-│   ├── t14-networkpolicy.sh        T-14：影子端 egress 隔離實測（需叢集，含對照組）
-│   └── t14-test-pods.yaml          T-14 用測試 Pod（標籤對齊白名單 podSelector）
+│   ├── Dockerfile                  驗證環境映像（envoy / nginx / kubeconform / python3）
+│   └── k8s-isolation/              隔離拓樸執行期驗證（T-14，需 docker + kind）
 ├── demo/
 │   ├── demo-script.yaml            示範影片內容腳本（章節／字幕／指令／輸出）
 │   ├── render_demo.py              影片渲染器（Pillow 畫格 → ffmpeg 出 mp4）
@@ -338,11 +338,11 @@ correctly suppressed` 代表沒有誤報。兩個數字任一不對就是引擎�
 `sanitize-gor.py`、`gor_parser`、`normalizer`、`diff_engine`、`00`/`04` 腳本
 **都是實際執行**，只有「搬運流量」那一層用等價的 Python 重放器代替。
 
-結果：**60 / 60 通過**（含本次為防止缺陷復發而新增的 11 項回歸檢查）。
+結果：**62 / 62 通過**（含為防止本節所列缺陷復發而新增的回歸檢查）。
 最後一行會是：
 
 ```
- 驗證結果：60/60 通過
+ 驗證結果：62/62 通過
 ```
 
 ### L4 容器實測（wslc）
@@ -535,8 +535,7 @@ route 層的 header 操作會作用在**被路由的那個請求**，也就是�
 ```bash
 kind create cluster --name shadow-poc
 kubectl apply -f config/k8s/shadow-namespace.yaml
-./verify/t14-networkpolicy.sh              # 驗證
-./verify/t14-networkpolicy.sh --cleanup    # 清掉測試 Pod
+./verify/k8s-isolation/isolation-verify.sh
 ```
 
 #### 為什麼不能只看 `kubectl get networkpolicy`
@@ -590,7 +589,7 @@ namespace **之外**放一個不受 policy 管的對照 Pod：**對照組通、�
 
 所以在目前的 kind 上，`kind create cluster` 直接就能驗 T-14，不必換 CNI。
 但**較舊的 kindnetd 並未實作 NetworkPolicy**，換一個叢集、換一版就可能不同 ——
-這恰恰是「必須實測而非假設」的理由。若 `t14-networkpolicy.sh` 回報「阻斷」項
+這恰恰是「必須實測而非假設」的理由。若 `isolation-verify.sh` 回報「阻斷」項
 **全數**失敗（實得 OPEN），第一個要懷疑的就是 CNI。
 
 真正的 `new-app` Deployment 在 kind 上會停在 `ImagePullBackOff` / `Pending`
@@ -622,7 +621,7 @@ L1–L3 全部通過的情況下，L4 抓出以下問題。**#1–#8 已修正�
 修正後重新驗證：nginx `-t` 通過且鏡像實際生效（穩態 40/40）、Envoy validate
 OK 且 0 警告、**Envoy 執行期契約測試 11/11**（與 Nginx 路徑一致）、gor flag 全部
 被接受、`04-run-diff.sh` 三種離開碼（0/1/2）行為正確、T-14 兩種 CNI 各 12/12、
-L3 由 49/49 提升到 **60/60**（新增 11 項針對上述缺陷的回歸檢查，避免復發）。
+L3 由 49/49 提升到 **62/62**（新增針對上述缺陷的回歸檢查，避免復發）。
 
 ### 觀察到但無法穩定重現的現象
 
@@ -675,11 +674,89 @@ kubeconform -summary -strict config/k8s/shadow-namespace.yaml
 # T-14：egress 隔離實測
 kind create cluster --name shadow-poc
 kubectl apply -f config/k8s/shadow-namespace.yaml
-./verify/t14-networkpolicy.sh
+./verify/k8s-isolation/isolation-verify.sh
 ```
 
 C3–C5 使用的模擬應用、測試驅動與設定產生器產生於暫存目錄、不入版控；
 方法與替換清單如上，可依此重建。T-14 的工具則已收進 `verify/`。
+
+## 在 wslc 容器中執行驗證
+
+`wslc` 是 WSL 內建的容器 CLI（Windows 11 的 WSL 2.9 起隨附，路徑
+`C:\Program Files\WSL\wslc.exe`），子命令與 Docker 幾乎一致。Windows 上不必安裝
+Docker Desktop 即可取得一個乾淨的 Linux 環境。
+
+對本套件的用處是：本機通常沒有 `envoy`、`nginx`、`kubeconform`，設定檔檢查就只能
+退回讀字串比對——而那正是會製造假通過的做法（見 `docs/03-verification-report.md`
+第 3.11 節：一份 Envoy 根本載不進去的設定，曾因字串斷言而拿到通過）。用容器把
+這些二進位補齊，`verify/e2e_verify.py` 第 10 節就會實際載入設定驗證。
+
+### 建置驗證映像
+
+```bash
+wslc build -t pt-verify:1 -f verify/Dockerfile verify/
+```
+
+### 執行整套驗證
+
+專案目錄以**唯讀**掛載，容器內複製一份再動工，工作樹不會被寫入：
+
+```bash
+wslc run --rm -v "<專案絕對路徑>:/src:ro" pt-verify:1 bash -c '
+    mkdir -p /work && cp -a /src/. /work/ && cd /work || exit 1
+    bash -n scripts/*.sh
+    ( cd diff && python3 selftest.py )
+    echo "127.0.0.1 k8s-ingress.internal" >> /etc/hosts   # nginx -t 的 upstream 需可解析
+    python3 verify/e2e_verify.py
+'
+```
+
+預期 `verify/e2e_verify.py` 輸出 62/62 通過，其中設定檔實載三項為：
+
+```
+✅ Envoy 實際載入設定通過（envoy --mode validate）
+✅ K8s manifest 通過 schema 嚴格驗證（kubeconform -strict）
+✅ Nginx 實際載入設定通過（nginx -t）
+```
+
+### 只驗單一設定檔
+
+```bash
+# Envoy bootstrap
+wslc run --rm -v "<專案絕對路徑>:/src:ro" pt-verify:1 \
+    envoy --mode validate -c /src/config/k8s/envoy-shadow.yaml
+
+# K8s manifest（不需叢集）
+wslc run --rm -v "<專案絕對路徑>:/src:ro" pt-verify:1 \
+    kubeconform -strict -summary -kubernetes-version 1.31.0 \
+    /src/config/k8s/shadow-namespace.yaml
+```
+
+### 常用管理指令
+
+```bash
+wslc images                  # 列出映像
+wslc list                    # 列出容器
+wslc rmi pt-verify:1         # 刪除映像
+wslc pull python:3.13-slim   # 取得映像
+```
+
+### 兩個會踩到的地雷
+
+**1. `-v` 的參數要先組成單一字串再傳。** PowerShell 裡直接寫
+`-v "$path:/src:ro"` 會把 `$path:` 當成變數名解析，wslc 收到的容器路徑不以 `/`
+開頭而報 `E_INVALIDARG`：
+
+```powershell
+$mount = "C:\path\to\repo" + ":/src:ro"      # 先組好
+wslc run --rm -v $mount pt-verify:1 bash /scripts/run.sh
+```
+
+**2. wslc 跑不了 kind / k3s。** `wslc run` 沒有 `--privileged`、`--cap-add`、
+`--device`、`--security-opt`，巢狀容器執行環境起不來；kind 也只支援
+docker / podman / nerdctl 三種 provider。因此**隔離拓樸驗證（T-14）不能在 wslc 內
+進行**，需要在一個 WSL 發行版裡裝 docker + kind——步驟見
+`verify/k8s-isolation/README.md`。
 
 ---
 
@@ -692,7 +769,7 @@ C3–C5 使用的模擬應用、測試驅動與設定產生器產生於暫存目
 2. **拿端到端 latency 直接比** → cgroup 節流、JVM 容器感知、多一跳網路會讓容器版看起來較慢，得出錯誤結論。
 3. **把自動學來的 ignore_paths 直接套用** → 這是唯一會讓 PoC「看起來成功但實際失敗」的路徑，也是最難事後發現的。
 4. **以為設定檔載入成功就等於行為正確** → `mirror $var;` 讓 nginx 完全不鏡像，但 `nginx -t` 通過、access log 還顯示命中（見「發現的缺陷」#5）。設定改動必須用真二進位實載並打流量驗證。
-5. **以為 NetworkPolicy 套用成功就等於擋得住** → 執行 policy 的是 CNI，CNI 沒實作時 `kubectl get networkpolicy` 一樣顯示規則存在而流量全通。必跑 `verify/t14-networkpolicy.sh`（含對照組）。
+5. **以為 NetworkPolicy 套用成功就等於擋得住** → 執行 policy 的是 CNI，CNI 沒實作時 `kubectl get networkpolicy` 一樣顯示規則存在而流量全通。必跑 `verify/k8s-isolation/isolation-verify.sh`（它會先移除 policy 確認探針測得到，再套回去確認被擋）。
 
 ---
 

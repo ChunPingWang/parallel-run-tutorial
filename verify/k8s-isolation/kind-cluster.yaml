@@ -1,0 +1,15 @@
+# kind 叢集設定 —— 隔離拓樸驗證專用
+#
+# ⚠ 停用 kind 預設的 kindnet，改裝 Calico，目的是取得**可重現**的結果：
+#   CNI 若不執行 NetworkPolicy，政策會「顯示成功但完全不擋」而產出假通過的報告。
+#   （kind v0.33 的 kindnetd 已會執行 NetworkPolicy，但版本之間會變，
+#     故此處固定用 Calico。）建立叢集後請接著安裝（見本目錄 README.md）。
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: shadow-poc
+networking:
+  disableDefaultCNI: true
+  podSubnet: "192.168.0.0/16"   # 對齊 Calico 預設 IPPool
+nodes:
+- role: control-plane
+- role: worker

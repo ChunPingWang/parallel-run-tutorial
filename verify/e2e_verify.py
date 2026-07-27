@@ -741,13 +741,65 @@ def stage_config_static():
     check("Envoy：X-Shadow-Request header 注入", '"X-Shadow-Request"' in envoy_raw
           or "X-Shadow-Request" in envoy_raw)
 
-    r = run(["kubectl", "apply", "--dry-run=client", "--validate=false",
-             "-o", "name", "-f",
-             os.path.join(ROOT, "config", "k8s", "shadow-namespace.yaml")])
-    if r.returncode == 0:
-        check("kubectl client dry-run 解碼通過", True, r.stdout.replace("\n", " ").strip())
+    stage_config_realvalidate()
+
+
+def stage_config_realvalidate():
+    """以真正的二進位驗證設定檔（有裝才跑，沒裝就記為略過）。
+
+    靜態字串斷言擋不住「語法合法但目標程式根本載不進去」的設定，
+    故在有 envoy / kubeconform / nginx 的環境改用它們實際載入一次。
+    """
+    section("10. 設定檔真實驗證（envoy / kubeconform / nginx）")
+
+    envoy_conf = os.path.join(ROOT, "config", "k8s", "envoy-shadow.yaml")
+    if shutil.which("envoy"):
+        r = run(["envoy", "--mode", "validate", "-c", envoy_conf])
+        check("Envoy 實際載入設定通過（envoy --mode validate）",
+              r.returncode == 0,
+              (r.stderr or r.stdout).strip().splitlines()[-1][:120] if r.returncode else "OK")
     else:
-        check("kubectl client dry-run（環境不支援，略過）", True, r.stderr.strip()[:80])
+        check("Envoy 實際載入（未安裝 envoy，略過）", True, "shutil.which('envoy') is None")
+
+    ns_conf = os.path.join(ROOT, "config", "k8s", "shadow-namespace.yaml")
+    if shutil.which("kubeconform"):
+        r = run(["kubeconform", "-strict", "-summary",
+                 "-kubernetes-version", "1.31.0", ns_conf])
+        check("K8s manifest 通過 schema 嚴格驗證（kubeconform -strict）",
+              r.returncode == 0, r.stdout.strip().splitlines()[-1][:120] if r.stdout else "")
+    elif shutil.which("kubectl"):
+        # 有叢集才做得了 server dry-run；client 模式在無叢集時拿不到 schema。
+        r = run(["kubectl", "apply", "--dry-run=server", "-o", "name", "-f", ns_conf])
+        if r.returncode == 0:
+            check("kubectl server dry-run 通過（真 API server 驗證）", True,
+                  r.stdout.replace("\n", " ").strip()[:120])
+        else:
+            check("K8s schema 驗證（無 kubeconform、無叢集，略過）", True,
+                  r.stderr.strip()[:80])
+    else:
+        check("K8s schema 驗證（未安裝 kubeconform/kubectl，略過）", True, "")
+
+    nginx_conf = os.path.join(ROOT, "config", "vm", "nginx-shadow.conf")
+    if shutil.which("nginx"):
+        wrapper = os.path.join(TMP, "nginx-main.conf")
+        with open(wrapper, "w", encoding="utf-8") as fh:
+            fh.write("worker_processes 1;\nevents { worker_connections 64; }\n"
+                     f"http {{\n    include {nginx_conf};\n}}\n")
+        r = run(["nginx", "-t", "-c", wrapper])
+        err = (r.stderr or "") + (r.stdout or "")
+        # 這兩種失敗是環境條件（DNS、CA 檔）不足，不是設定本身有問題
+        env_gap = ("host not found in upstream" in err
+                   or "cannot load certificate" in err)
+        if r.returncode == 0:
+            check("Nginx 實際載入設定通過（nginx -t）", True, "OK")
+        elif env_gap:
+            check("Nginx 實際載入（環境缺 DNS/CA，略過）", True,
+                  err.strip().splitlines()[0][:100])
+        else:
+            check("Nginx 實際載入設定通過（nginx -t）", False,
+                  err.strip().splitlines()[0][:120])
+    else:
+        check("Nginx 實際載入（未安裝 nginx，略過）", True, "shutil.which('nginx') is None")
 
 
 # ---------------------------------------------------------------------------

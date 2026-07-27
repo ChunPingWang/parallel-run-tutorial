@@ -3,30 +3,48 @@
 **驗證方法的完整說明在 `README.md` 的「驗證」一節**（含名詞速查、分層理由、
 逐項指令與如何讀輸出）。本檔是**帶日期的結果記錄**，供日後回溯。
 
----
+**環境**
 
-## 1. 兩次驗證的範圍差異
+- 第一輪（2026-07-25）：macOS（Darwin 25.4.0）、Python 3.14 + PyYAML 6.0.3、
+  kubectl（無叢集）、Node 26
+- 第二輪（2026-07-26）：WSL2 容器（wslc 2.9.4）內 Ubuntu 22.04 + Envoy v1.31
+  + nginx 1.18 + kubeconform v0.6.7 + Python 3.6；隔離拓樸另在 FedoraLinux-44
+  的 kind 叢集（k8s v1.36.1 + Calico v3.32.1，2 節點）實測
+- 第三輪（2026-07-26～27）：WSL2 / Fedora 44 原生 + wslc 容器，補上閘道與
+  GoReplay 的**執行期**行為（打真流量、量正線副作用），以及示範影片工具鏈
 
-| | 2026-07-25 | 2026-07-26 |
-|---|---|---|
-| 環境 | macOS（Darwin 25.4.0）、Python 3.14 + PyYAML 6.0.3 | WSL2 / Fedora 44、Python 3.14.6 + PyYAML 6.0.3 |
-| L1 靜態 | ✅ | ✅ |
-| L2 `selftest.py` | ✅ | ✅ |
-| L3 `e2e_verify.py` | ✅ 49/49 | ✅ **60/60**（+11 項回歸檢查） |
-| L4 容器實測（真 Nginx / Envoy / gor） | ❌ 未做（本機無二進位） | ✅ **做了 —— 抓出 12 項缺陷** |
-| T-14 egress 隔離實測 | ❌ 無叢集 | ✅ **kind 實測 12/12，兩種 CNI 各驗一次** |
-
-**7-25 的結論「49/49 全通過」在其範圍內成立，但範圍不足**：它完全沒有驗證
-Nginx / Envoy / gor 本體。7-26 補上容器層後，在前三層全綠的情況下仍抓出
-12 項缺陷，其中 6 項會讓對應元件在真實環境直接不可用或靜默失效 ——
-包含一項會讓**正線的正式交易靜默不執行副作用**（#11）。
-
-這是本次驗證最重要的一課：**「模擬所有外部元件」的端到端測試，無法驗證那些
-被模擬掉的元件。** 分層必須包含真二進位。
+**驗證方式** 靜態檢查 + `diff/selftest.py` + `verify/e2e_verify.py` 本機端到端
+模擬 + 設定檔真二進位載入 + 閘道執行期打流量 + K8s 叢集內隔離拓樸實測
 
 ---
 
-## 2. 結論（2026-07-26）
+## 1. 三輪驗證的範圍差異
+
+| | 第一輪 07-25 | 第二輪 07-26 | 第三輪 07-26～27 |
+|---|---|---|---|
+| L1 靜態 | ✅ | ✅ | ✅ |
+| L2 `selftest.py` | ✅ | ✅ | ✅ |
+| L3 `e2e_verify.py` | ✅ 49/49 | ✅ 53/53 | ✅ **62/62** |
+| 設定檔真二進位載入 | ❌ 無二進位 | ✅ 抓出 2 項缺陷 | ✅ |
+| 閘道**執行期**打流量 | ❌ | ❌ | ✅ **抓出 12 項缺陷** |
+| T-14 egress 隔離實測 | ❌ 無叢集 | ✅ 17/17 | ✅ |
+
+每一輪都是在**前一輪全綠**的情況下，靠加深驗證強度而抓出新缺陷：
+
+- 第二輪把設定檔檢查從「讀字串斷言」升級為「用目標程式實際載入」，
+  抓出 Envoy 的兩個載入錯誤（見 3.9）。
+- 第三輪再往前一步 —— **實際起閘道打流量，並量測正線的副作用** ——
+  又抓出 12 項，其中 6 項會讓對應元件在真實環境直接不可用或靜默失效。
+
+其中最嚴重的一項會讓**正線的正式交易靜默不執行副作用**（#11）。
+
+這三輪最重要的一課：**「模擬所有外部元件」的端到端測試，無法驗證那些被模擬掉
+的元件**；而「設定能載入」也不等於「行為正確」。驗證分層必須一路做到真二進位
+打真流量，並且**同時量測正線**，否則只會看到影子端一切正常。
+
+---
+
+## 2. 結論（2026-07-27）
 
 - 比對引擎與噪音抑制機制**成立**：真 gor 重放 60 筆，經專案 diff 引擎比對
   得 59/59 一致（一致率 100%），噪音全數抑制、Gate 全過。
@@ -49,7 +67,7 @@ Nginx / Envoy / gor 本體。7-26 補上容器層後，在前三層全綠的情�
 | 項目 | 結果 |
 |---|---|
 | `diff/selftest.py` | 4 筆注入缺陷全偵測、196 筆噪音全抑制、Gate 未過離開碼 1 |
-| `verify/e2e_verify.py` | 60/60；300 筆樣本一致率 100%；注入 8 筆缺陷 divergent=8（無漏檢無誤報） |
+| `verify/e2e_verify.py` | 62/62；300 筆樣本一致率 100%；注入 8 筆缺陷 divergent=8（無漏檢無誤報） |
 | Phase 0 基線 | 無 profile 假陽性 100% → Gate 擋下；套簽核 profile 後 0.000% |
 | 不可違反約束 #3 | `baseline` 未自動改寫 `diff/noise-profile.yaml`，僅產生候選檔 ✅ |
 | Phase 3 容忍歸零 | 0.5 元 CDC 落差在 Phase 1（abs=1.0）被容忍、Phase 3 全數偵測（150/150）|
@@ -79,19 +97,99 @@ Nginx / Envoy / gor 本體。7-26 補上容器層後，在前三層全綠的情�
 （「主連線在子請求結束前不會釋放」）不成立；結論（timeout 不得放寬）不變，
 但理由已改寫為資源佔用（子請求綁住 worker 與 upstream 連線）。
 
-### 3.4 T-14 egress 隔離（12 項，兩種 CNI 各跑一次）
+### 3.4 缺陷偵測
 
-| CNI | 版本 | 結果 |
+注入 8 筆真實缺陷（GET 金額 -1 且回 500 ×6、POST 手續費截斷 ×2）：
+
+- divergent = 8，恰等於注入數（無漏檢、無誤報）✅
+- 分類正確：`STATUS_MISMATCH` ×6、`availableBalance` 與 `fee` 路徑上榜 ✅
+- 候選端新增 status code（500）被標記 ✅
+- Phase 1 Gate 擋下，離開碼 1 ✅
+
+### 3.5 Phase 3 容忍歸零（ADR-005，T-30）
+
+模擬 CDC 同步落差（餘額 -0.5）：
+
+- Phase 1 + `abs: 1.0` 容忍 → 一致率 100%，Gate 通過（合理容忍）✅
+- Phase 3 + 容忍歸零 → 150 筆 GET 全數偵測，Gate 擋下 ✅
+
+### 3.6 解析器邊界
+
+gzip 回應解壓、chunked 回應重組皆正確 ✅
+
+### 3.7 設定檔（不可違反約束 #1 / #4）
+
+- NetworkPolicy：預設拒絕 egress、放行清單皆 namespace/pod 白名單、
+  無 `ipBlock`、無 `0.0.0.0/0` ✅
+- Deployment：`APP_MODE=shadow`、scheduler 關閉、requests = limits、
+  Kafka `shadow.` 前綴 ✅
+- Nginx：影子 timeout 維持 connect 200ms / read 2s、不重試、
+  location internal、trace 隔離 ✅
+- Envoy：影子 cluster connect ≤ 200ms（Duration 格式合法）、`max_retries: 0`、
+  關閉鏡像 Host 的 `-shadow` 後綴、`runtime_key` 熱調 ✅
+
+### 3.8 簡報腳本
+
+`docs/build-deck.js` 以 pptxgenjs 實際執行成功，產出檔與
+`dist/poc-exec-deck.pptx` 位元組數完全一致（346,266 bytes），產物可重現。
+
+### 3.9 設定檔真二進位驗證（新增，R7）
+
+第一輪的設定檔檢查全部是「讀檔比對字串」。第二輪改由目標程式實際載入，
+結果如下：
+
+| 設定 | 方法 | 結果 |
 |---|---|---|
-| kindnet（kind 預設）| `kindest/kindnetd:v20260528` | 12/12 —— 現版已實作 NetworkPolicy |
-| Calico | v3.32.1（`disableDefaultCNI: true` 後裝）| 12/12 |
+| `config/k8s/shadow-namespace.yaml` | `kubeconform -strict`（k8s 1.31 schema） | ✅ 5 份資源全數 valid |
+| `config/vm/nginx-shadow.conf` | nginx 1.18 `nginx -t` 實際載入 | ✅ 通過 |
+| `config/k8s/envoy-shadow.yaml` | Envoy v1.31 `--mode validate` | ❌ → 修正後 ✅ |
 
-驗證內容：白名單放行（影子 DB 5432、WireMock 8080、DNS）全通；未列白名單的
-同 namespace Pod、白名單 Pod 的非放行埠、外部網路全擋；`app=rogue` 這種
-不符任何放行規則的 Pod 連 DNS 都不通（`default-deny-egress` 涵蓋所有 Pod）。
-每個「應被擋」項目都有 shadow namespace 外的對照組，以排除「本來就不通」。
+**Envoy 設定原本載入失敗，兩處真實缺陷：**
 
-工具已收進 repo：`verify/t14-networkpolicy.sh`、`verify/t14-test-pods.yaml`。
+1. `connect_timeout: 200ms` —— Envoy 用 protobuf Duration，只接受秒為單位的
+   寫法，`200ms` 讓整份 bootstrap 解析失敗。已改為等值的 `0.2s`
+   （**數值未放寬**，仍是 200ms）。Nginx 的 `200ms` 是合法的，此坑僅限 Envoy。
+2. `host_rewrite_literal` 被寫在 Cluster 上 —— Cluster 沒有這個欄位
+   （`no such field`）。原始意圖（覆寫 Envoy 自動加的 `-shadow` Host 後綴）
+   的正確做法是在 mirror policy 上設 `disable_shadow_host_suffix_append: true`，
+   已改用該欄位並實測通過驗證。
+
+**為什麼第一輪沒抓到：** `verify/e2e_verify.py` 當時斷言的是字串
+`connect_timeout == "200ms"`，正是這條斷言讓一份 Envoy 根本載不進去的設定拿到
+✅。斷言已改為解析數值後比對上限，並新增第 10 節在有二進位時實際載入驗證。
+
+反向測試皆已確認驗證會咬人：kubeconform 對注入的未知欄位判 invalid；
+nginx 對非法 `proxy_connect_timeout` 值報 emerg。
+
+### 3.10 隔離拓樸執行期驗證（T-14，不可違反的約束 #1）
+
+在 kind + Calico 的 2 節點叢集實測，工具見 `verify/k8s-isolation/`：
+
+| 情境 | 期望 | 實測 |
+|---|---|---|
+| **對照組**（先移除 NetworkPolicy） | 可連正式 DB、可連外網 | ✅ 兩者皆通 |
+| `app=new-app` → 正式 DB 5432 | 被擋 | ✅ 逾時 |
+| `app=new-app` → 外部網際網路 1.1.1.1:443 | 被擋 | ✅ 逾時 |
+| `app=new-app` → 影子 DB / wiremock / observability / DNS | 可通 | ✅ 四項皆通 |
+| 未帶 `app=new-app` 的 Pod → 全部目標 | 全擋（含 DNS） | ✅ 六項皆逾時 |
+| 超額 Pod（20 CPU / 40Gi） | 被 ResourceQuota 擋 | ✅ `exceeded quota` |
+| 未宣告 requests/limits 的 Pod | 被擋 | ✅ `must specify` |
+| 整份 manifest `--dry-run=server` | 通過 | ✅ |
+
+方法上的兩個要點：
+
+1. **對照組不可省。** 沒有「移除 policy 後確實連得到」這一步，「連不到」可能只是
+   目標本來就不存在，綠燈毫無意義。
+2. **探針一律用 Pod IP 直連、不經 DNS。** 否則 DNS 被擋時所有目標都會失敗，
+   無法分辨是 NetworkPolicy 生效還是名稱解析失敗。
+
+**必要前提：CNI 必須真的執行 NetworkPolicy。** 本次以
+`disableDefaultCNI: true` 建立叢集並改裝 Calico v3.32.1，17 項全數符合預期。
+
+補充一則實測更正：**kind v0.33 的預設 CNI（kindnetd `v20260528`）已經會執行
+NetworkPolicy** —— 同一份 policy 在它上面也擋得住。較早的 kindnetd 確實不執行，
+這正是「必須實測而非假設」的理由：換一個叢集、換一版 CNI 結果就可能不同。
+若本工具回報「阻斷」項**全數**失敗（實測 reachable=yes），第一個要懷疑的就是 CNI。
 
 ---
 
@@ -140,10 +238,11 @@ Nginx / Envoy / gor 本體。7-26 補上容器層後，在前三層全綠的情�
 
 | 項目 | 原因 | 對應檢核 |
 |---|---|---|
-| `gor --input-raw` 實際錄製 | 需 `CAP_NET_RAW`，`wslc run` 無此開關；改以應用層產生等價 `.gor` | T-10 |
+| `gor --input-raw` 實際錄製 | 需 `CAP_NET_RAW`，`wslc run` 無此開關。**重放已用真 gor 1.3.3 實測**，錄製僅驗證 flag 組合 | T-10 |
+| 正式環境 CNI 下的 NetworkPolicy 行為 | 已在 kind + Calico 實測生效（3.10）；正式叢集的 CNI、既有政策與網段仍需複驗 | T-14 |
+| VM 側實際拓樸（L4 VIP、shadow-gw、真實 Ingress） | 模擬環境無 VM 與 Ingress；Host 路由以「影子端檢查收到的 Host」代替 | T-12 |
 | 影子線 TLS（`proxy_ssl_*`、SNI、內部 CA）| 測試環境未架內部 CA，實測時移除該四行 | R7 |
 | Envoy `runtime_key` 熱調與緊急回退 | 只驗證欄位存在與 100% 生效，未實測熱調過程 | R7 |
-| K8s Ingress 依 Host/SNI 選 backend 的實際行為 | 以「影子端檢查收到的 Host」代替真 Ingress | T-12 |
 | CDC 實際延遲分布、gor CPU 佔用、正線 P99 增幅 | 需真實環境與真實負載 | T-11、T-21、T-24 |
 
 ---
@@ -153,8 +252,40 @@ Nginx / Envoy / gor 本體。7-26 補上容器層後，在前三層全綠的情�
 1. `04-run-diff.sh` 報告檔名為秒級時間戳，同一秒重跑會互相覆蓋。自動化批次
    呼叫時請自行指定 `REPORT_DIR`（`verify/e2e_verify.py` 即如此處理）。
 2. `sanitize-gor.py` 的 PAN 規則（13–19 碼）會先於 ACCOUNT 規則吃掉 16 碼帳號，
-   遮蔽前綴為 `PAN_` —— 行為一致故不影響比對，但報表命中統計會偏向 PAN，
-   校準規則時需留意。
-3. 套件需 PyYAML；Python 3.9 / 3.14 皆未內建，驗證時以 venv 安裝。
-4. `docs/build-deck.js` 需 Node（本次 WSL 環境無 Node，未重跑）。7-25 於 macOS
-   實際執行成功，產出與 `dist/poc-exec-deck.pptx` 位元組數一致（346,266 bytes）。
+   遮蔽前綴為 `PAN_` —— 行為一致故不影響比對，但報表命中統計歸類會偏向 PAN，
+   校準規則時（CLAUDE.md 已知限制）需留意。
+3. 套件需 PyYAML；本機 Python 3.7 / 3.14 皆未內建，README 依賴一節已列明，
+   驗證時以 venv 安裝。
+4. **字串斷言會製造假通過。** 3.9 的 Envoy 缺陷是被自己的斷言掩護住的：
+   斷言比對 `"200ms"` 這個字串，而該值正是讓 Envoy 載入失敗的原因。
+   凡是「設定內容」的檢查，只要目標程式提供驗證模式（`nginx -t`、
+   `envoy --mode validate`、`kubeconform`），就應優先用它取代字串比對。
+5. **驗證一定要有對照組。** 3.10 先移除 NetworkPolicy 確認連得到、再套回確認被擋；
+   缺了前半段，「被擋」與「目標根本不存在」在報告上長得一模一樣。
+
+6. `docs/build-deck.js` 需 Node。第三輪的 WSL 環境無 Node，未重跑；
+   7-25 於 macOS 執行成功，產出與 `dist/poc-exec-deck.pptx` 位元組數
+   一致（346,266 bytes），產物可重現。
+
+## 8. 重跑方式
+
+### 8.1 主套件
+
+```bash
+python3 -m venv .venv && .venv/bin/pip install pyyaml
+.venv/bin/python verify/e2e_verify.py --out-json tmp-verify/results.json
+cd diff && ../.venv/bin/python selftest.py
+```
+
+`verify/e2e_verify.py` 第 10 節會在偵測到 `envoy` / `kubeconform` / `nginx`
+時實際載入設定驗證；未安裝則記為略過。要讓這三項真的執行，可用容器：
+
+```bash
+# 映像需含 envoy + nginx + kubeconform + python3(PyYAML)
+wslc run --rm -v "$PWD:/src:ro" <image> python3 /src/verify/e2e_verify.py
+```
+
+### 8.2 隔離拓樸（T-14）
+
+見 `verify/k8s-isolation/README.md`。需要一個會執行 NetworkPolicy 的 CNI
+（kind 預設的 kindnet 不會，須改裝 Calico 或 Cilium）。

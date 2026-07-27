@@ -86,7 +86,10 @@ static_resources:
                       # 熱調鍵：Phase 1 起手 10 -> 50 -> 100；回退設 0
                       runtime_key: shadow.mirror_fraction
                     trace_sampled: false
-                    # 不要在 Host 後面加 "-shadow"；Host 由 internal listener 改寫
+                    # 關閉 Envoy 預設加在 Host 上的 -shadow 後綴。
+                    # 註：此為 mirror policy 層級欄位，Cluster 上沒有
+                    #     host_rewrite_literal。真正把 Host 改成
+                    #     new-app.bank.internal 是在下方的 internal listener 做。
                     disable_shadow_host_suffix_append: true
               # ⚠ 影子 header 絕對不可加在這條路由上。
               #   route 層的 request_headers_to_add 會同時套到**主線**請求，
@@ -185,6 +188,8 @@ static_resources:
   # 鏡像第二跳：Host 已改寫完成，打向真正的 K8s Ingress
   - name: new_k8s_ingress
     type: STRICT_DNS
+    # 影子端連線逾時壓短（200ms）。
+    # Envoy 用 protobuf Duration，只吃秒為單位的寫法，"200ms" 會讓整份設定解析失敗。
     connect_timeout: 0.2s
     lb_policy: ROUND_ROBIN
     circuit_breakers:
