@@ -327,13 +327,18 @@ def evaluate_gates(
             "passed": consistency >= min_consistency,
         }
     )
+    # max_latency_ratio <= 0 表示「停用此 Gate，只當參考值」。
+    # ADR-005：性能判準是應用內部 timer。端到端 latency 會被多一跳網路、
+    # cgroup 節流、重放器自身開銷污染，拿它擋關會導出錯誤結論。
     ratio = report["latency_ms"]["p99_ratio"]
+    latency_gated = max_latency_ratio > 0
     gates.append(
         {
             "gate": "latency_p99_ratio",
-            "threshold": f"<= {max_latency_ratio}",
+            "threshold": (f"<= {max_latency_ratio}" if latency_gated
+                          else "參考值，未設為 Gate（ADR-005）"),
             "actual": ratio,
-            "passed": ratio == 0.0 or ratio <= max_latency_ratio,
+            "passed": (not latency_gated) or ratio == 0.0 or ratio <= max_latency_ratio,
         }
     )
     new_codes = report["status_distribution"]["new_codes_in_candidate"]

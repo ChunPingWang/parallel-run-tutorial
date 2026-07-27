@@ -54,6 +54,16 @@ exec "$GOR_BIN" \
   --output-file "${OUT_DIR}/legacy_%Y%m%d-%H%M%S.gor" \
   --output-file-append \
   --output-file-size-limit "${ROTATE_SIZE}" \
-  --output-file-max-size 50gb \
+  --output-file-max-size-limit 50gb \
   --exit-after "${DURATION}" \
-  --stats --output-file-stats
+  --stats --input-raw-stats
+
+# ⚠ flag 名稱已對 gor 1.3.3 實測驗證。易錯處：
+#   --output-file-max-size  不存在（正確為 --output-file-max-size-limit）
+#   --output-file-stats     不存在（錄製端統計為 --input-raw-stats）
+#   打錯 gor 會以 "flag provided but not defined" 立刻結束，不會錄到任何東西。
+#
+# ⚠ gor 會在副檔名前插入 chunk 序號，實際落地檔名是
+#   legacy_20260725-090000_0.gor（不是腳本裡寫的那個名字）。
+#   後續步驟請用 ls 取實際檔名，例：
+#     ls -t "${OUT_DIR}"/legacy_*_*.gor | head -1

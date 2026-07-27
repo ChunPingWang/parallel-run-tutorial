@@ -1,0 +1,358 @@
+# =====================================================================
+# demo-script.yaml  -  操作示範影片的內容腳本
+# ---------------------------------------------------------------------
+# 改文案與節奏只需要動這個檔。改完先跑：
+#     python3 demo/render_demo.py --dry-run
+# 它會檢查缺字、破格、字幕超寬、敏感字串，並印出完整時間軸。
+#
+# 欄位：
+#   host      指令跑在哪台機器：legacy / shadow / gw / local
+#             （會渲染成終端機標題列的 badge ── 這個專案最常見的錯誤
+#               就是搞錯「這一步在哪台機器上做」）
+#   source    real        = 逐字取自實際執行結果
+#             illustrative = 本機無法執行，文字取自腳本自己的 echo，
+#                            數值為示意值。畫面會標「※ 示意輸出」
+#   dwell     覆寫字幕停留秒數（不填則由公式計算）
+#   key       標記關鍵輸出行：額外停留並加高亮底
+#   adr       這一章對應的決策記錄，改 ADR 時要一併檢查此檔
+# =====================================================================
+
+meta:
+  title: 新舊應用平行測試 PoC
+  cols: 88
+  rows: 12
+
+chapters:
+  # -------------------------------------------------------------------
+  - id: 0
+    title: 這支影片要示範什麼
+    lead: 用生產的真實流量，驗證新舊系統功能等價
+    host: local
+    beats:
+      - kind: note
+        subtitle: 舊應用跑在 VM，新應用要搬到容器。上線前必須證明兩件事。
+      - kind: output
+        source: real
+        lines:
+          - ""
+          - "  舊應用（VM）  ──── 同一批真實流量 ────  新應用（容器 / K8s）"
+          - ""
+          - "     ① 功能等價：每一筆回應都比對，不是抽樣"
+          - "     ② 性能容量：以真實流量放大倍率驗證"
+          - ""
+          - "  第一原則：正線不受影響。錄製是被動側錄，不改流量路徑。"
+        subtitle: 功能等價與性能容量。而且驗證過程本身不能影響正線。
+      - kind: note
+        subtitle: 主方案是錄製重放：在 legacy VM 上被動側錄，離線重放到新應用。
+      - kind: note
+        subtitle: 也有即時鏡像的備案，但那要動到正線路徑上的閘道，風險高一級。
+      - kind: clear
+        subtitle: 整個流程有 7 個步驟，接下來逐步示範。
+
+  # -------------------------------------------------------------------
+  - id: 1
+    title: 步驟 0：先驗證工具本身
+    lead: 尺規沒校準過，量出來的數字沒有意義
+    host: local
+    adr: [ADR-004]
+    beats:
+      - kind: cmd
+        host: local
+        cmd: cd diff && python3 selftest.py
+        subtitle: 比對引擎會自己造一份含已知噪音與已知缺陷的假錄製檔。
+      - kind: output
+        source: real
+        lines:
+          - "GATE FAILED: consistency, latency_p99_ratio, no_new_status_codes"
+          - "{"
+          - '  "total_exchanges": 200,'
+          - '  "identical": 196,'
+          - '  "divergent": 4'
+          - "}"
+          - "categories: {'STATUS_MISMATCH': 4, 'BODY_DIFF': 4}"
+          - text: "OK - 4 real defects detected, 196 noisy responses correctly suppressed"
+            key: true
+        subtitle: 該抓的 4 筆缺陷全抓到，該抑制的 196 筆噪音全抑制。
+      - kind: clear
+      - kind: cmd
+        cmd: python3 verify/e2e_verify.py
+        subtitle: 再跑一次完整管線：遮蔽、基線、比對、Gate 判定全部真的執行。
+      - kind: output
+        source: real
+        lines:
+          - "  ✅ 遮蔽後檔案不含任何原始個資"
+          - "  ✅ 一致性雜湊：同一帳號全檔只有一個 token"
+          - "  ✅ dry-run 生效：影子端簡訊發送數 = 0（150 筆轉帳）"
+          - "  ✅ 注入 8 筆缺陷全數呈現為不一致（無漏檢、無誤報）"
+          - "  ✅ Nginx：mirror 目標為靜態 URI（不可用變數）"
+          - "=================================================="
+          - text: " 驗證結果：60/60 通過"
+            key: true
+        subtitle: 60 項全過，才代表這把尺可以拿去量新舊應用的差異。
+      - kind: note
+        subtitle: 這一步常被跳過。但比對引擎如果會漏檢，後面每一個數字都不可信。
+      - kind: note
+        subtitle: 而漏檢的表現形式是「一致率很漂亮」，不會有任何錯誤訊息。
+
+  # -------------------------------------------------------------------
+  - id: 2
+    title: 步驟 1：跨界連通性
+    lead: 混合拓撲的假陽性，有一半來自這裡沒先驗過
+    host: legacy
+    adr: [ADR-006]
+    beats:
+      - kind: cmd
+        host: legacy
+        cmd: |-
+          TARGET_HOST=new-app.bank.internal \
+          XFF_ECHO_PATH=/api/v1/_echo \
+          ./scripts/00-preflight.sh
+        subtitle: 在 legacy VM 上執行，確認 VM 打得到 K8s 那一側。
+      - kind: output
+        source: illustrative
+        lines:
+          - "── 1. DNS 解析 ──────────────"
+          - "  ✅ 解析成功 -> 10.20.30.40"
+          - "── 3. MTU（Overlay 網路常見陷阱）──"
+          - "  ✅ payload 1422 bytes 通過（實際 MTU >= 1450）"
+          - "── 5. Host header 路由 ──────────────"
+          - "     正確 Host -> 200 ；沿用舊 Host -> 404"
+          - text: "  ✅ 沿用舊 Host 如預期被拒 -> 重放時務必改寫 Host header"
+            key: true
+        subtitle: Host 沒改寫，Ingress 會回 404，報告上看起來像「新應用大量 4xx」。
+      - kind: output
+        source: illustrative
+        lines:
+          - "── 8. Shadow header 端到端 ──────────"
+          - "  ✅ 帶 X-Shadow-Request 可正常回應（應用需據此進 dry-run）"
+          - "=============================================="
+          - text: " PASS=7  FAIL=0  WARN=2"
+            key: true
+        subtitle: FAIL 必須是 0 才可以往下走。WARN 項仍要人工確認。
+      - kind: note
+        subtitle: MTU 是 Overlay 網路的常見陷阱：大 POST body 跨界時會被黑洞。
+      - kind: note
+        subtitle: XFF 也要驗：經 Ingress 與 Service NAT 後，Pod 看到的來源 IP 會變。
+      - kind: note
+        subtitle: 新應用若依 client IP 做風控，取值索引與舊系統不同就會出大量假陽性。
+
+  # -------------------------------------------------------------------
+  - id: 3
+    title: 步驟 2：錄製生產流量
+    lead: 被動側錄網卡，正線零改動
+    host: legacy
+    adr: [ADR-001]
+    beats:
+      - kind: cmd
+        host: legacy
+        cmd: sudo PERCENT=5 DURATION=60m ./scripts/01-record.sh
+        subtitle: 直接監聽網卡，不加 proxy、不改 LB、不動應用程式。
+      - kind: output
+        source: illustrative
+        lines:
+          - "=============================================="
+          - " GoReplay 錄製"
+          - "   port      : 8080"
+          - "   sampling  : 5%"
+          - "   duration  : 60m"
+          - "=============================================="
+          - "⚠ 錄製內容含 request/response body。確認："
+          - "  1) 保留天數已設定  2) 目錄權限 700、磁碟已加密"
+          - text: "  3) 落盤後須跑 sanitize-gor.py 遮蔽個資才可移出本機"
+            key: true
+        subtitle: 錄下的不只是請求，還有舊應用的回應 ── 那就是正確答案。
+      - kind: note
+        subtitle: 重放到舊應用等於再轉一次帳，所以答案必須在錄製當下就抓下來。
+      - kind: note
+        subtitle: 注意 gor 實際落地的檔名會多一個序號後綴，例如 legacy_..._0.gor。
+      - kind: note
+        subtitle: 取樣從 5% 起，並排除健康檢查、靜態資源與上傳類端點。
+      - kind: note
+        subtitle: 側錄需要 root 或 CAP_NET_RAW，佔用的 CPU 必須先實測並列入 Gate。
+
+  # -------------------------------------------------------------------
+  - id: 4
+    title: 步驟 3：遮蔽個資
+    lead: 移出正線主機之前，這一步不可略過
+    host: legacy
+    adr: [ADR-007]
+    beats:
+      - kind: cmd
+        host: legacy
+        cmd: |-
+          export SALT=$(cat /etc/shadow-poc/salt)
+          python3 scripts/sanitize-gor.py capture_0.gor clean.gor --report
+        subtitle: SALT 是固定值。沒設定的話腳本會拒絕執行，離開碼 2。
+      - kind: output
+        source: illustrative
+        lines:
+          - "遮蔽規則命中統計"
+          - "  TWID            1204"
+          - "  MOBILE           887"
+          - "  ACCOUNT         2310"
+          - "  AUTH_HEADER     4102"
+          - text: "  一致性雜湊：同一帳號在 path 與 body 遮成同一 token"
+            key: true
+          - "輸出檔權限 600"
+        subtitle: 一致性很關鍵：同一個帳號必須遮成同一個 token，否則比對會出假陽性。
+      - kind: note
+        subtitle: 遮蔽報告零命中時不得放行 ── 那代表規則與實際資料格式不符。
+      - kind: note
+        subtitle: 不是「這批資料沒有個資」。這個誤判會讓未遮蔽的資料流出正線。
+      - kind: note
+        subtitle: 遮蔽規則涵蓋身分證、手機、卡號、帳號、Email 與授權 header。
+      - kind: note
+        subtitle: 遮蔽後仍必須能解析與配對 ── 否則等於把整批錄製檔報廢。
+
+  # -------------------------------------------------------------------
+  - id: 5
+    title: 步驟 4：Phase 0 噪音基線
+    lead: 先把「必然不同但無關正確性」的欄位量出來
+    host: local
+    adr: [ADR-004]
+    beats:
+      - kind: note
+        subtitle: 新舊回應一定會有時間戳、traceId、hostname 這類差異。
+      - kind: note
+        subtitle: 不處理的話一致率是 0%，真實缺陷會被噪音淹沒。
+      - kind: cmd
+        cmd: |-
+          ./scripts/02-replay-functional.sh clean.gor
+          python3 diff/diff_engine.py baseline --combined replay_0.gor \
+              --gate-false-positive 1.0
+        subtitle: 把同一批流量重放到舊應用的第二個實例 ── 舊 vs 舊。
+      - kind: output
+        source: real
+        lines:
+          - "false-positive rate=100.000%"
+          - "GATE FAILED"
+          - ""
+          - "候選 ignore_paths（須人工複核）："
+          - "  - $.hostname"
+          - "  - $.timestamp"
+          - "  - $.traceId"
+        subtitle: 兩邊都是舊應用，所以任何差異都必然是噪音。這讓噪音是量出來的。
+      - kind: note
+        subtitle: 自動學到的 ignore_paths 是候選，不是結論。
+        dwell: 4.0
+      - kind: note
+        subtitle: 必須逐條人工簽核 ── 自動學習會把排序不穩定的金額欄位也列進來。
+      - kind: note
+        subtitle: 那正是真實缺陷會躲藏的位置。這是唯一會讓 PoC 看起來成功的失敗路徑。
+      - kind: output
+        source: real
+        lines:
+          - "# 逐條簽核後，套用正式 profile 重跑"
+          - ""
+          - "false-positive rate=0.000%"
+          - text: "ALL GATES PASSED"
+            key: true
+        subtitle: 簽核後的 profile 重跑一次，假陽性降到 0%，基線才算建立。
+      - kind: note
+        subtitle: 假陽性率就是「舊 vs 舊還被判為不一致」的比例，門檻是 1%。
+
+  # -------------------------------------------------------------------
+  - id: 6
+    title: 步驟 5：Phase 1 到 3 功能比對
+    lead: 由唯讀查詢逐步推進到核心交易
+    host: local
+    adr: [ADR-003, ADR-006]
+    beats:
+      - kind: cmd
+        cmd: |-
+          ./scripts/02-replay-functional.sh clean.gor
+          PHASE=1 PROFILE=diff/noise-profile.signed.yaml \
+              ./scripts/04-run-diff.sh replay_0.gor
+        subtitle: 重放時會改寫 Host、加上 X-Shadow-Request 讓新應用進 dry-run。
+      - kind: output
+        source: real
+        lines:
+          - "Phase 1  |  一致率門檻 99.9%  |  profile: diff/noise-profile.yaml"
+          - ""
+          - text: "ALL GATES PASSED"
+            key: true
+          - "報告：reports/phase1_20260726-162918.md"
+          - ""
+          - "✅ Phase 1 Gate 通過。"
+          - "   提醒：一致率達標仍需人工抽樣複核 30 筆。"
+        subtitle: 實測 59 筆全部一致，噪音被 profile 完全抑制。
+      - kind: note
+        subtitle: 門檻逐階段收緊：唯讀 99.9%、非核心寫入 99.95%、核心交易 100%。
+      - kind: note
+        subtitle: 離開碼 0 是通過、1 是 Gate 未過、2 是引擎沒跑完 ── 後者不是判定結果。
+      - kind: note
+        subtitle: CI 依離開碼擋關。Gate 沒過就停在原階段，不往下推。
+      - kind: note
+        subtitle: 重放時新應用會進 dry-run：照常運算，但不發簡訊、不呼叫外部。
+      - kind: output
+        source: real
+        lines:
+          - "  ✅ Header 契約零違規（Host / X-Shadow-Request / Idempotency-Key）"
+          - "  ✅ traceparent 已清空（APM 兩條 trace 不互相污染）"
+          - "  ✅ 正線副作用照常：legacy 發出 20 筆簡訊"
+          - text: "  ✅ dry-run 生效：影子端發出 0 筆簡訊"
+            key: true
+        subtitle: 這是實測數字：正線 20 筆簡訊照發，影子端 0 筆。
+      - kind: note
+        subtitle: 只檢查影子端正常是不夠的，必須同時量測正線副作用有沒有照常發生。
+      - kind: note
+        subtitle: 一致率達標仍要人工抽樣複核 30 筆，確認不是被 profile 過度抑制。
+
+  # -------------------------------------------------------------------
+  - id: 7
+    title: 步驟 6：Phase 4 性能驗證
+    lead: 容量要用倍率重放，不能靠推估
+    host: local
+    adr: [ADR-005]
+    beats:
+      - kind: cmd
+        cmd: LADDER="100 200 500" ./scripts/03-replay-perf.sh clean.gor
+        subtitle: 同一份錄製檔，重放 1 倍驗對錯，重放 5 倍驗撐不撐得住。
+      - kind: output
+        source: illustrative
+        lines:
+          - "=============================================="
+          - " 階段 100%  ->  perf_100pct_20260727-101500.gor"
+          - "=============================================="
+          - "階段 100% 結束"
+          - "檢查：CFS throttle / GC pause / 連線池飽和 / 錯誤率"
+          - "冷卻 180s..."
+          - text: " 階段 500%  ->  perf_500pct_20260727-104500.gor"
+            key: true
+        subtitle: 每個階段之間冷卻 180 秒，讓指標回穩再進下一階。
+      - kind: note
+        subtitle: 判準是兩邊應用的內部 timer，不是端到端 latency。
+        dwell: 4.0
+      - kind: note
+        subtitle: 容器多一跳網路、cgroup 節流、JVM 容器感知都會讓端到端數字失真。
+      - kind: note
+        subtitle: 拿它直接比，會得出「新應用比較慢」的錯誤結論，然後去優化錯的東西。
+      - kind: note
+        subtitle: 所以資源基準要先對齊：requests 等於 limits，並確認 CFS 節流為 0。
+      - kind: note
+        subtitle: HPA 必須關閉、replica 固定，否則每次測到的都是不同的系統。
+      - kind: note
+        subtitle: JVM 也要校正：容器內預設 heap 只取記憶體四分之一，會讓 GC 過於頻繁。
+
+  # -------------------------------------------------------------------
+  - id: 8
+    title: 最容易出錯的三件事
+    lead: 共同特徵是表面訊號完全正常
+    host: local
+    beats:
+      - kind: output
+        source: real
+        lines:
+          - ""
+          - "  ① Host header 沒改寫"
+          - "     Ingress 回 404，報告上表現為「新應用大量 4xx」"
+          - ""
+          - "  ② 拿端到端 latency 直接比"
+          - "     容器版看起來較慢，導出錯誤結論"
+          - ""
+          - "  ③ 把自動學來的 ignore_paths 直接套用"
+          - text: "     唯一會讓 PoC「看起來成功但實際失敗」的路徑"
+            key: true
+        subtitle: 這三件事都不會報錯，也不會讓任何 Gate 變紅。
+      - kind: note
+        subtitle: 所以每一道 Gate 都要有證據，未過就停 ── 這是整套流程的底線。

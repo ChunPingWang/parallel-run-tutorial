@@ -654,6 +654,13 @@ def stage_config_static():
           re.search(r"proxy_read_timeout\s+2s", nginx))
     check("Nginx：影子端不重試、location internal",
           "proxy_next_upstream   off" in nginx and "internal;" in nginx)
+    # mirror 指令不支援變數：寫成 `mirror $var;` 時 nginx 會把 "$var" 當字面
+    # URI，鏡像靜默失效（影子端 0 筆），而 nginx -t 照樣通過。此檔曾犯此錯。
+    check("Nginx：mirror 目標為靜態 URI（不可用變數，否則鏡像靜默失效）",
+          bool(re.search(r"^\s*mirror\s+/\S+;", nginx, re.M)) and
+          not re.search(r"^\s*mirror\s+\$", nginx, re.M))
+    check("Nginx：鏡像比例判斷改置於影子 location 內",
+          bool(re.search(r'if \(\$shadow_bucket\s*=\s*"off"\)\s*\{\s*return 204;\s*\}', nginx)))
     check("Nginx：X-Shadow-Request / Idempotency-Key 後綴 / trace 隔離",
           'X-Shadow-Request  "true"' in nginx and "-shadow" in nginx and
           'proxy_set_header traceparent ""' in nginx)
@@ -663,10 +670,71 @@ def stage_config_static():
     envoy_raw = open(os.path.join(ROOT, "config", "k8s", "envoy-shadow.yaml"),
                      encoding="utf-8").read()
     clusters = {c["name"]: c for c in envoy["static_resources"]["clusters"]}
-    check("Envoy：影子 cluster connect 200ms、不重試、Host 覆寫",
-          clusters["new_cluster"]["connect_timeout"] == "200ms" and
-          clusters["new_cluster"]["circuit_breakers"]["thresholds"][0]["max_retries"] == 0 and
-          clusters["new_cluster"].get("host_rewrite_literal") == "new-app.bank.internal")
+    listeners = {l["name"]: l for l in envoy["static_resources"]["listeners"]}
+
+    # 時間欄位必須是合法的 protobuf Duration（"200ms" 會讓 Envoy 拒絕載入整份
+    # bootstrap）。只比對字串等於 "200ms" 的舊寫法會給出假保證，故改為語意檢查。
+    def as_seconds(v):
+        return float(str(v).rstrip("s"))
+
+    check("Envoy：影子端連線逾時壓短且為合法 Duration（0.2s，不可寫 200ms）",
+          all(str(clusters[c]["connect_timeout"]).endswith("s") and
+              not str(clusters[c]["connect_timeout"]).endswith("ms") and
+              as_seconds(clusters[c]["connect_timeout"]) <= 0.2
+              for c in ("new_cluster", "new_k8s_ingress")),
+          f"new_cluster={clusters['new_cluster']['connect_timeout']}, "
+          f"new_k8s_ingress={clusters['new_k8s_ingress']['connect_timeout']}")
+    check("Envoy：影子端不重試（max_retries: 0）",
+          clusters["new_k8s_ingress"]["circuit_breakers"]["thresholds"][0]["max_retries"] == 0)
+
+    # Host 改寫只能在 route 層做（Cluster 沒有 host_rewrite_literal 這個欄位），
+    # 因此鏡像須先進 internal listener 改 Host 再轉給 Ingress。
+    check("Envoy：Cluster 上沒有非法的 host_rewrite_literal 欄位",
+          all("host_rewrite_literal" not in c for c in clusters.values()))
+    rewrite = listeners.get("shadow_host_rewrite", {})
+    route = (rewrite.get("filter_chains", [{}])[0].get("filters", [{}])[0]
+             .get("typed_config", {}).get("route_config", {})
+             .get("virtual_hosts", [{}])[0].get("routes", [{}])[0].get("route", {}))
+    check("Envoy：internal listener 於 route 層改寫 Host 為 new-app.bank.internal",
+          "internal_listener" in rewrite and
+          route.get("host_rewrite_literal") == "new-app.bank.internal" and
+          route.get("cluster") == "new_k8s_ingress")
+    check("Envoy：internal listener 已註冊 bootstrap extension（否則啟動即失敗）",
+          any(b.get("name") == "envoy.bootstrap.internal_listener"
+              for b in envoy.get("bootstrap_extensions", [])))
+    check("Envoy：鏡像不加 -shadow Host 後綴（disable_shadow_host_suffix_append）",
+          "disable_shadow_host_suffix_append: true" in envoy_raw)
+
+    # 影子 header 若掛在主路由，request_headers_to_add 會同時套到主線請求，
+    # 正式交易會被舊應用當成影子請求而進 dry-run（副作用靜默不執行）。
+    # 這是實際發生過的缺陷，且只有實跑流量才看得出來。
+    main_listener = listeners["shadow_listener"]
+    main_routes = (main_listener["filter_chains"][0]["filters"][0]["typed_config"]
+                   ["route_config"]["virtual_hosts"][0]["routes"])
+    main_added = [h["header"]["key"].lower()
+                  for r in main_routes for h in r.get("request_headers_to_add", [])]
+    check("Envoy：主路由未加任何影子 header（否則會污染正線，使正式交易進 dry-run）",
+          not any(k in main_added for k in
+                  ("x-shadow-request", "x-origin-platform", "accept-encoding")),
+          f"主路由加了：{main_added or '無'}")
+
+    rewrite_added = {h["header"]["key"].lower(): h["header"]["value"]
+                     for h in (rewrite.get("filter_chains", [{}])[0].get("filters", [{}])[0]
+                               .get("typed_config", {}).get("route_config", {})
+                               .get("virtual_hosts", [{}])[0].get("routes", [{}])[0]
+                               .get("request_headers_to_add", []))}
+    check("Envoy：影子 header 掛在 internal listener 的路由上（只作用於鏡像）",
+          all(k in rewrite_added for k in
+              ("x-shadow-request", "x-origin-platform", "accept-encoding")),
+          f"internal listener 加了：{sorted(rewrite_added) or '無'}")
+    check("Envoy：Idempotency-Key 加 -shadow 後綴（ADR-006，與 Nginx 路徑一致）",
+          rewrite_added.get("idempotency-key", "").endswith("-shadow"),
+          rewrite_added.get("idempotency-key", "(無)"))
+    rewrite_route_cfg = (rewrite.get("filter_chains", [{}])[0].get("filters", [{}])[0]
+                         .get("typed_config", {}).get("route_config", {})
+                         .get("virtual_hosts", [{}])[0].get("routes", [{}])[0])
+    check("Envoy：影子路徑清空 traceparent（APM 兩條 trace 不互相污染）",
+          "traceparent" in (rewrite_route_cfg.get("request_headers_to_remove") or []))
     check("Envoy：鏡像比例走 runtime_key（可熱調 / 回退）",
           "shadow.mirror_fraction" in envoy_raw and
           "request_mirror_policies" in envoy_raw)

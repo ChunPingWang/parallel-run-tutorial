@@ -14,7 +14,14 @@
 | `docs/adr/ADR-005-perf-metric-normalization.md` | 性能指標正規化 |
 | `docs/adr/ADR-006-header-contract.md` | Shadow 流量 Header 契約 |
 | `docs/adr/ADR-007-pii-masking-and-retention.md` | 錄製檔個資遮蔽與保留政策 |
-| `docs/03-verification-report.md` | 本機端到端驗證報告（49 項檢查） |
+| `docs/03-verification-report.md` | 驗證報告（L1–L4 分層結果與發現的缺陷） |
 | `verify/e2e_verify.py` | 本機端到端驗證工具（模擬新舊服務） |
+| `verify/t14-networkpolicy.sh` | T-14 影子端 egress 隔離實測（需叢集，含對照組） |
+| `verify/t14-test-pods.yaml` | T-14 用測試 Pod（標籤對齊白名單 podSelector） |
+| `demo/demo-script.yaml` | 操作示範影片的內容腳本（章節／字幕／指令／輸出） |
+| `demo/render_demo.py` | 示範影片渲染器（Pillow 畫格 → ffmpeg 出 mp4） |
+| `demo/fontkit.py` | 字型與字寬工具（缺字偵測、CJK 斷行、手繪符號） |
+| `demo/README.md` | 影片重跑方式、節奏調整、字型與 ffmpeg 限制說明 |
 | `dist/poc-exec-deck.pptx` / `.pdf` | 管理層簡報產出物（可由 build-deck.js 重現） |
+| `dist/poc-demo.mp4` / `.zh-TW.srt` | 操作示範影片與字幕（不入版控，可由 demo/ 重現） |
 | `dist/poc-package.zip` | 對外交付打包 |

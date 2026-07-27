@@ -46,6 +46,16 @@ echo
   --output-file "${OUTPUT}" \
   --stats
 
+# gor 會在副檔名前插入 chunk 序號：replay_x.gor -> replay_x_0.gor（可能多個）。
+# 直接沿用 ${OUTPUT} 會指到不存在的檔案，因此改取實際落地的檔名。
+ACTUAL="$(ls -t "${OUT_DIR}"/replay_${STAMP}_*.gor 2>/dev/null | head -1 || true)"
+if [ -z "$ACTUAL" ]; then
+  echo "⚠ 找不到 gor 產出的檔案（預期 ${OUTPUT%.gor}_N.gor）。" >&2
+  echo "  請確認 gor 是否成功啟動，以及 ${OUT_DIR} 是否可寫。" >&2
+  exit 1
+fi
+
 echo
+echo "實際產出：${ACTUAL}"
 echo "完成。接著執行："
-echo "  ./04-run-diff.sh ${OUTPUT}"
+echo "  ./04-run-diff.sh ${ACTUAL}"

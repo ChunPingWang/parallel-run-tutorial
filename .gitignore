@@ -1,6 +1,9 @@
 # 系統雜訊
 .DS_Store
 
+# Claude Code 本機權限設定（每台機器不同，不入版控）
+.claude/settings.local.json
+
 # Python
 __pycache__/
 *.pyc
@@ -12,3 +15,9 @@ node_modules/
 # 本機驗證產出的暫存資料（錄製檔、報告一律不入版控）
 /tmp-verify/
 *.gor
+
+# 示範影片產出：每次重新渲染的 blob 都不同，入版控會讓 repo 快速膨脹。
+# 來源（demo/*.yaml、demo/*.py）已版控，隨時可重現；對外交付走 poc-package.zip。
+/dist/*.mp4
+/dist/*.srt
+/demo/frames/
